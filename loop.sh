@@ -27,11 +27,51 @@ set -m
 
 # ---- Config constants (no project specifics) -------------------------------
 PLAN="${1:-plan.md}"
+LOOP_DIR=".loop"
 STATUS_FILE=".loop/status.json"
 LOG_DIR=".loop/logs"
 HUMAN_VERIFICATION="human-verification.md"
 MAX_TURNS=80
+# Active-time budget per call: the wall-clock time a call may spend *working*,
+# EXCLUDING any time the loop is parked prompting the human for an ask-tier
+# approval (the human's deliberation is free). This is the real per-call limit,
+# enforced by the watch-loop, and is expressed in seconds for arithmetic.
 CALL_TIMEOUT=40m
+CALL_TIMEOUT_SECS=2400
+# Coarse absolute backstop: a large ceiling that still wraps the call in
+# `timeout`, so a wedged watch-loop (or a hook that somehow never returns) can't
+# pin the machine forever. The active-time budget above is the primary enforcer;
+# this only catches a genuinely stuck process tree. GNU `timeout` syntax.
+CALL_BACKSTOP=4h
+
+# Approval-coordination files shared with the deny-check hook (see deny-check.sh).
+# The hook writes a request to APPROVAL_REQUEST when an ask-tier command needs the
+# human, then blocks until APPROVAL_RESPONSE appears; the foreground loop renders
+# the prompt, reads the TTY, and writes the response. Approval is per-invocation —
+# nothing here is persisted across runs.
+APPROVAL_REQUEST=".loop/pending-approval.json"
+APPROVAL_RESPONSE=".loop/approval-response"
+APPROVAL_LOG=".loop/logs/approvals.log"
+# Cadence (seconds) at which the watch-loop polls for an approval request and for
+# job completion. Short enough to feel responsive, coarse enough to stay cheap.
+WATCH_POLL_INTERVAL=0.2
+
+# Where the approval prompt is rendered (…_OUT) and the human's reply is read from
+# (…_IN). Both are the controlling terminal — NOT the call pipeline's stdin/stdout,
+# which is tied up with stream-json — so approvals work while a call is streaming.
+# The two overrides exist ONLY as a test seam: the suite points _IN at a file
+# pre-filled with the answer and _OUT at a throwaway file, so the otherwise-
+# blocking prompt/read path is machine-verifiable without a real TTY. Production
+# uses /dev/tty for both. (Separate handles so a test's prompt write can't clobber
+# the file the read consumes.)
+APPROVAL_TTY_OUT="${LOOP_APPROVAL_TTY_OUT:-/dev/tty}"
+APPROVAL_TTY_IN="${LOOP_APPROVAL_TTY_IN:-/dev/tty}"
+
+# Whether interactive ask-tier approvals are enabled this run is signalled SOLELY
+# by the exported LOOP_APPROVAL_DIR: preflight exports it (the absolute .loop/
+# path) when a usable TTY is probed, and leaves it unset otherwise. The hook keys
+# off that single variable — when it is unset/empty the hook degrades every
+# ask-tier command to an immediate deny, so a headless run can never deadlock.
 
 # Process-group id of the in-flight claude call's subshell (set in run_step /
 # run_final, cleared after each call). The signal trap reads this to tear down
@@ -137,8 +177,16 @@ terminate_tree() {
 
 		# Graceful: TERM every group (negative pid = the whole group), give a
 		# 2-second grace window, then KILL groups and any snapshotted survivors.
+		# The grace window is SKIPPED when nothing actually survives the TERM — the
+		# overwhelmingly common case, since a call almost always exits cleanly on its
+		# own and this fires on an already-dead tree. (terminate_tree runs after
+		# EVERY call, so an unconditional 2s sleep would tax every phase/step for no
+		# benefit.) Whenever a process is still alive — the genuine teardown case the
+		# interrupt path exercises — the full grace window is honoured before KILL.
 		for g in $groups; do kill -TERM -- "-${g}" 2>/dev/null; done
-		sleep 2
+		local alive=0
+		for p in $leader $pids; do kill -0 "$p" 2>/dev/null && { alive=1; break; }; done
+		(( alive )) && sleep 2
 		for g in $groups; do kill -KILL -- "-${g}" 2>/dev/null; done
 		# Backstop for setsid'd strays that left their group: KILL each snapshot
 		# PID directly (deepest-first), then the leader.
@@ -256,11 +304,167 @@ section_header() {
 		"$phase_num" "$total" "$step_name" "$k"
 }
 
+# ---- Interactive ask-tier approvals ----------------------------------------
+# The deny-check hook runs inside the backgrounded call pipeline (a background
+# process group) and so CANNOT read the controlling terminal. The foreground
+# loop must do the TTY read. The hook publishes an ask-tier request to
+# APPROVAL_REQUEST and blocks polling for APPROVAL_RESPONSE; here we render the
+# prompt, read one line from the human, write the decision back, and let the hook
+# delete both files (see deny-check.sh). Approval is per-invocation — nothing is
+# persisted. Time spent in this prompt is the human's free deliberation time and
+# is EXCLUDED from the active-time budget by the watch-loop that calls us.
+
+# Append one decision line to APPROVAL_LOG. Best-effort: a failed log write must
+# never derail the loop.
+# log_approval <rule> <command> allowed|denied
+log_approval() {
+	local rule="$1" command="$2" verdict="$3" ts
+	ts="$(date -Iseconds 2>/dev/null || date 2>/dev/null || printf '?')"
+	printf '%s · phase %s/%s · %s · %s · %s\n' \
+		"$ts" "${CURRENT_PHASE:-?}" "${CURRENT_STEP:-?}" "$rule" "$command" "$verdict" \
+		>>"$APPROVAL_LOG" 2>/dev/null || true
+}
+
+# Read, render, prompt for, and answer a single pending ask-tier approval request.
+# Returns 0 always (the response is communicated to the hook via the file). The
+# read is from the controlling terminal directly ($APPROVAL_TTY, i.e. /dev/tty) so
+# it works even with the call pipeline attached to stdin/stdout, and is
+# interruptible by Ctrl+C (which fires on_interrupt and aborts the whole loop —
+# unchanged). EOF/Ctrl+D, bare Enter, or anything other than y/yes (case-
+# insensitive, trimmed) ⇒ deny.
+handle_approval_request() {
+	local rule command description reply verdict
+
+	# Parse the request the hook wrote. Missing/garbled fields degrade gracefully.
+	rule="$(jq -r '.rule // "?"' "$APPROVAL_REQUEST" 2>/dev/null || printf '?')"
+	command="$(jq -r '.command // "?"' "$APPROVAL_REQUEST" 2>/dev/null || printf '?')"
+	description="$(jq -r '.description // empty' "$APPROVAL_REQUEST" 2>/dev/null || true)"
+
+	# Get the human's attention: desktop notification (guarded like handback) and
+	# the terminal bell. Neither is allowed to break the loop.
+	if command -v notify-send >/dev/null 2>&1; then
+		notify-send "Loop approval needed: ${rule}" "$command" 2>/dev/null || true
+	fi
+	printf '\a' >>"$APPROVAL_TTY_OUT" 2>/dev/null || printf '\a'
+
+	# Render the prompt to the terminal (append, so a single-file test seam keeps
+	# the whole prompt rather than truncating it write-by-write).
+	{
+		printf '\n⚠️  Approval needed — Phase %s / %s\n' "${CURRENT_PHASE:-?}" "${CURRENT_STEP:-?}"
+		printf '  Rule    : %s  (ask-tier)\n' "$rule"
+		printf '  Command : %s\n' "$command"
+		[[ -n "$description" ]] && printf '  Claude  : "%s"\n' "$description"
+		printf 'Approve? [y/N]   (Enter/anything = deny · Ctrl+C = abort whole loop)\n'
+	} >>"$APPROVAL_TTY_OUT" 2>/dev/null || true
+
+	# Read one line straight from the controlling terminal. A failed open (no TTY)
+	# or EOF leaves $reply empty, which denies — fail closed.
+	reply=""
+	IFS= read -r reply <"$APPROVAL_TTY_IN" 2>/dev/null || reply=""
+
+	# Normalise: trim surrounding whitespace, lower-case.
+	reply="${reply#"${reply%%[![:space:]]*}"}"
+	reply="${reply%"${reply##*[![:space:]]}"}"
+	reply="$(printf '%s' "$reply" | tr '[:upper:]' '[:lower:]')"
+
+	if [[ "$reply" == "y" || "$reply" == "yes" ]]; then
+		verdict=allow
+	else
+		verdict=deny
+	fi
+
+	# Answer the hook (it polls for this file, then deletes BOTH files). Write to a
+	# temp and mv so the hook never reads a half-written response.
+	printf '%s\n' "$verdict" >"${APPROVAL_RESPONSE}.tmp" 2>/dev/null \
+		&& mv -f "${APPROVAL_RESPONSE}.tmp" "$APPROVAL_RESPONSE" 2>/dev/null
+
+	printf '  → %s\n\n' "$verdict" >>"$APPROVAL_TTY_OUT" 2>/dev/null || true
+	[[ "$verdict" == allow ]] && log_approval "$rule" "$command" allowed || log_approval "$rule" "$command" denied
+
+	# Handshake: wait until the hook has CONSUMED this request (it deletes the
+	# request file once it reads our response) before returning. Without this the
+	# watch-loop could re-poll and re-prompt the SAME still-present request, and a
+	# late second response could outlive the hook's cleanup — leaving a stray
+	# response file. Bounded by the hook's own poll cadence, so it is brief; it
+	# falls under the (free) deliberation pause the caller is already accounting.
+	local spins=0
+	while [[ -f "$APPROVAL_REQUEST" && $spins -lt 600 ]]; do
+		sleep "$WATCH_POLL_INTERVAL" 2>/dev/null || sleep 1
+		spins=$(( spins + 1 ))
+	done
+	return 0
+}
+
+# ---- Watch-loop: supervise one in-flight call ------------------------------
+# Replaces a plain `wait "$pid"`. Concurrently: (1) services ask-tier approval
+# requests (pausing the active-time clock while the human deliberates), (2)
+# enforces the per-call ACTIVE-time budget (excluding those prompt pauses), and
+# (3) detects job completion and reaps the exit code. The coarse `timeout`
+# backstop wrapping the call is the only thing that catches a wedged watch-loop;
+# this budget is the real limit.
+#
+# Sets the reaped exit code into the global WATCH_EC (NOT echoed via command
+# substitution — this MUST run in the calling shell so `wait "$pid"` can reap a
+# job the caller backgrounded, and so a handback's `exit` actually terminates the
+# script). Must run with set -e disabled by the caller (it polls dead PIDs and
+# reads possibly-missing files). When <gating> is 1 a budget breach hands back
+# (loud, exits); when 0 (the non-gating success-path final-verification) it
+# instead tears the tree down and records a timeout-style code (124), leaving the
+# caller's warning path to handle it.
+# watch_call <pid> <phase_label> <step_label> <log> <gating>
+WATCH_EC=0
+watch_call() {
+	local pid="$1" phase="$2" step="$3" log="$4" gating="${5:-1}"
+	local start now active paused=0 pause_start
+
+	start="$(date +%s 2>/dev/null || printf 0)"
+
+	while :; do
+		# (1) Service a pending approval request, if any. The whole prompt is OUTSIDE
+		# the active-time accounting: we note the wall time on entry and add the full
+		# prompt duration to $paused, so deliberation never eats the budget.
+		if [[ -f "$APPROVAL_REQUEST" ]]; then
+			pause_start="$(date +%s 2>/dev/null || printf 0)"
+			handle_approval_request
+			now="$(date +%s 2>/dev/null || printf 0)"
+			paused=$(( paused + (now - pause_start) ))
+			continue   # re-poll immediately: the call may now complete or ask again
+		fi
+
+		# (2) Job completion: once the leader is gone, reap it for the real exit code
+		# and we're done. `kill -0` is the liveness probe; `wait` yields the status.
+		if ! kill -0 "$pid" 2>/dev/null; then
+			wait "$pid" 2>/dev/null
+			WATCH_EC=$?
+			return 0
+		fi
+
+		# (3) Active-time budget. active = wall elapsed − time parked on the human.
+		now="$(date +%s 2>/dev/null || printf 0)"
+		active=$(( (now - start) - paused ))
+		if (( active >= CALL_TIMEOUT_SECS )); then
+			terminate_tree "$pid"
+			if (( gating )); then
+				handback "$phase" "$step" "exceeded ${CALL_TIMEOUT} active time" "$log"
+				# handback exits; the line below is unreachable but keeps intent clear.
+			fi
+			# Non-gating: record a timeout-style code; the caller warns, never blocks.
+			WATCH_EC=124
+			return 0
+		fi
+
+		sleep "$WATCH_POLL_INTERVAL" 2>/dev/null || sleep 1
+	done
+}
+
 # ---- The single choke point ------------------------------------------------
 # run_step <phase_num> <step_name> <slash_invocation>
 run_step() {
 	local phase_num="$1" step_name="$2" slash="$3"
 	rm -f "$STATUS_FILE"
+	# Clear any approval request/response from a prior call so this call starts from
+	# a blank slate — a stale response must never auto-answer a fresh prompt.
+	rm -f "$APPROVAL_REQUEST" "$APPROVAL_RESPONSE"
 	local log="${LOG_DIR}/phase-${phase_num}-${step_name}.jsonl"
 
 	# Expose the phase/step to the interrupt handler so its notice can name them.
@@ -272,14 +476,16 @@ run_step() {
 	#
 	# The pipeline runs as a backgrounded subshell so that (a) under `set -m` it
 	# is its own process group — killable as a whole by the interrupt trap — and
-	# (b) we block in `wait`, which is interruptible, instead of a foreground
-	# pipeline, which would defer the trap. The subshell re-exits with the
-	# pipeline head's status (timeout/claude), so the existing exit-code logic
-	# (124 timeout, 130 sigint, etc.) is unchanged. tee still writes the raw,
-	# ANSI-free JSONL log upstream of the formatter.
+	# (b) we supervise it with the watch-loop, which (like `wait`) blocks in
+	# interruptible foreground bash, instead of a foreground pipeline, which would
+	# defer the trap. The subshell re-exits with the pipeline head's status
+	# (timeout/claude), so the existing exit-code logic (124 timeout, 130 sigint,
+	# etc.) is unchanged. tee still writes the raw, ANSI-free JSONL log upstream of
+	# the formatter. `timeout` here is the COARSE BACKSTOP (CALL_BACKSTOP) only —
+	# the watch-loop's active-time budget is the real per-call limit.
 	set +e
 	(
-		timeout "$CALL_TIMEOUT" \
+		timeout "$CALL_BACKSTOP" \
 			claude -p "${slash} ${PLAN} --status ${STATUS_FILE}" \
 			--output-format stream-json --verbose \
 			--max-turns "$MAX_TURNS" \
@@ -290,7 +496,10 @@ run_step() {
 	) &
 	local pid=$!            # subshell = process-group leader under set -m
 	CURRENT_PGID="$pid"
-	wait "$pid"; local ec=$?
+	# Supervise the call: service approvals, enforce the active-time budget, reap
+	# the exit code into WATCH_EC. May not return (handback exits on a budget
+	# breach). Runs in THIS shell so its `wait` can reap our background job.
+	watch_call "$pid" "$phase_num" "$step_name" "$log" 1; local ec=$WATCH_EC
 	# timeout TERMs only its direct child, orphaning node/MCP grandchildren, and a
 	# clean exit can still leave detached strays — sweep the group either way. A
 	# no-op once nothing survives.
@@ -313,15 +522,20 @@ run_step() {
 # the caller judges success by whether the checklist file appears.
 run_final() {
 	local log="${LOG_DIR}/final-verification.jsonl"
+	# Blank slate for this call's approval coordination (see run_step).
+	rm -f "$APPROVAL_REQUEST" "$APPROVAL_RESPONSE"
 
 	CURRENT_PHASE="final"
 	CURRENT_STEP="final-verification"
 
-	# Same backgrounded-subshell shape as run_step: own process group under
-	# set -m, interruptible wait, formatter on the tail, raw log via tee.
+	# Same backgrounded-subshell shape as run_step: own process group under set -m,
+	# supervised by the watch-loop, formatter on the tail, raw log via tee. The
+	# coarse CALL_BACKSTOP wraps the call; the watch-loop's active-time budget is
+	# the real limit. Non-gating (gating=0): a budget breach here warns, never
+	# blocks, since every phase is already committed by the time this runs.
 	set +e
 	(
-		timeout "$CALL_TIMEOUT" \
+		timeout "$CALL_BACKSTOP" \
 			claude -p "/final-verification ${PLAN}" \
 			--output-format stream-json --verbose \
 			--max-turns "$MAX_TURNS" \
@@ -332,7 +546,7 @@ run_final() {
 	) &
 	local pid=$!
 	CURRENT_PGID="$pid"
-	wait "$pid"; local ec=$?
+	watch_call "$pid" "$CURRENT_PHASE" "$CURRENT_STEP" "$log" 0; local ec=$WATCH_EC
 	terminate_tree "$CURRENT_PGID"
 	CURRENT_PGID=0
 	set -e
@@ -382,6 +596,32 @@ preflight() {
 	ensure_excluded ".loop/"
 	ensure_excluded "$HUMAN_VERIFICATION"
 	mkdir -p "$LOG_DIR"
+
+	# Sweep any stale approval coordination files from an aborted prior run, so a
+	# leftover request/response can never auto-answer or mis-render this run.
+	rm -f "$APPROVAL_REQUEST" "$APPROVAL_RESPONSE"
+
+	# Interactive ask-tier approvals require a usable controlling terminal that the
+	# FOREGROUND loop can read — the hook itself runs in a background process group
+	# and cannot. We probe by trying to OPEN THE READ SOURCE ($APPROVAL_TTY_IN,
+	# i.e. /dev/tty) for reading: that is what handle_approval_request actually
+	# reads from, so it is the honest test (more robust than `[ -t 0 ]`, which is
+	# false whenever stdin is redirected even in a real terminal session, and it
+	# naturally honours the test seam). When there is no usable TTY (cron, CI,
+	# nohup, a pipe), we do NOT export LOOP_APPROVAL_DIR; the hook then degrades
+	# every ask-tier command to an immediate deny — identical to the pre-feature
+	# behaviour, with no risk of deadlock.
+	if { exec 3<"$APPROVAL_TTY_IN"; } 2>/dev/null; then
+		exec 3<&-   # close the probe fd; we only needed to know it opens
+		# Hand the hook (via claude's inherited env) the absolute .loop/ path, whose
+		# mere presence is the "interactive approvals enabled" signal. Absolute so the
+		# hook resolves it regardless of cwd.
+		export LOOP_APPROVAL_DIR
+		LOOP_APPROVAL_DIR="$(cd "$LOOP_DIR" && pwd)"
+	else
+		unset LOOP_APPROVAL_DIR 2>/dev/null || true
+		printf 'loop.sh: warning — no TTY detected — interactive approvals disabled this run; ask-tier commands will be denied.\n' >&2
+	fi
 }
 
 # ---- Outer loop ------------------------------------------------------------

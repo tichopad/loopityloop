@@ -53,21 +53,49 @@ That's it. The loop selects the next `⏳` phase, works it, commits it, and move
 
 - **Commits** — one atomic commit per completed phase (the skills commit; the script never does). It **never pushes**.
 - `.loop/logs/phase-N-<step>.jsonl` — full transcript per phase/step.
+- `.loop/logs/approvals.log` — one line per ask-tier decision (timestamp · phase/step · rule · command · allowed/denied), when any approvals were prompted.
 - `human-verification.md` — on success, a consolidated checklist of human-only checks, grouped by phase with "how to verify" hints. Work through it, then run `/pr-create` yourself.
 
 (`.loop/` and `human-verification.md` are auto-added to `.git/info/exclude` — never committed.)
 
 ## When it stops
 
-It **fails closed**: any abnormal outcome (crash, timeout, max-turns, a `blocked` status, a missing status write) stops the loop with a loud handback banner naming the **phase, step, reason, and log path**. The phase is left `🔄` with partial work uncommitted for you to inspect. The loop never advances on a false success.
+It **fails closed**: any abnormal outcome (crash, exceeding the 40-minute active-time budget, max-turns, a `blocked` status, a missing status write) stops the loop with a loud handback banner naming the **phase, step, reason, and log path**. The phase is left `🔄` with partial work uncommitted for you to inspect. The loop never advances on a false success.
+
+The 40-minute budget is **active time** — it excludes any time the loop spends parked on an interactive approval prompt. A coarse 4-hour `timeout` still wraps each call as an absolute backstop, but it only fires if the supervising watch-loop itself wedges; the active-time budget is the real per-call limit.
 
 ## Safety
 
 Runs under `--dangerously-skip-permissions`, so containment is layered:
 
 - **Structural (primary):** feature-branch-only + per-phase commits = every phase boundary is a clean restore point.
-- **Deny-list hook (`deny-check.sh`):** blocks irreversible commands even under bypass — `git push`, `git reset --hard`, `rm -rf`, `curl`, `wget`. The loop refuses to start if this hook is missing or non-executable.
-- **Bounds:** per-call max-turns (80) and wall-clock timeout (40m), plus an overall iteration ceiling derived from the plan.
+- **Tri-state gate (`deny-check.sh`):** a single `PreToolUse` hook vets every Bash command, even under bypass (a hook denial wins over `--dangerously-skip-permissions`). Three outcomes:
+  - **Hard-deny — never offered:** `git push`, `git reset --hard`. Always blocked; a stray approval can never reach these.
+  - **Ask-the-human:** `rm -rf`, `curl`, `wget`. Pauses the loop and asks for a one-time approval (see below). Deleting only Markdown is exempt: an `rm` (even `rm -rf`) whose every target ends in `.md` runs silently.
+  - **Allow:** everything else runs silently.
+
+  The loop refuses to start if this hook is missing or non-executable.
+- **Bounds:** per-call max-turns (80) and a **40-minute active-time budget** (excluding any time spent waiting on a human approval), plus a coarse 4-hour absolute backstop and an overall iteration ceiling derived from the plan.
+
+### Interactive approvals (the ask tier)
+
+When the agent tries an ask-tier command (`rm -rf`, `curl`, `wget`), the loop pauses, rings the terminal bell, fires a desktop notification (if `notify-send` exists), and prompts you on the terminal:
+
+```
+⚠️  Approval needed — Phase 3 / verify
+  Rule    : rm -rf  (ask-tier)
+  Command : rm -rf node_modules/.cache
+  Claude  : "Clearing stale build cache before reinstalling"
+Approve? [y/N]   (Enter/anything = deny · Ctrl+C = abort whole loop)
+```
+
+- `y` / `yes` (case-insensitive, trimmed) **approves** just that one command. Anything else, a bare Enter, or Ctrl+D **denies**. Ctrl+C aborts the whole loop.
+- The wait is **indefinite** and your deliberation time is **free** — it does not count against the 40-minute budget.
+- Approval is **per-invocation**: nothing is remembered. The next `rm -rf` asks again.
+- **Markdown deletes are exempt:** an `rm` (even `rm -rf`) whose targets are all `*.md` files runs without a prompt. Any non-`.md` target, a directory, or a chained command (`&&`, `|`, …) still asks.
+- Every decision is appended to `.loop/logs/approvals.log`.
+
+**No terminal? No problem — it fails closed.** With no usable controlling terminal (cron, CI, `nohup`, a pipe), interactive approval is impossible, so the loop prints a non-fatal startup warning and **silently denies every ask-tier command** — exactly the old behaviour, with no risk of hanging on a prompt nobody can answer.
 
 ## Where this fits
 

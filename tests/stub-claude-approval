@@ -1,0 +1,103 @@
+#!/usr/bin/env bash
+#
+# stub-claude-approval — a fake `claude` that exercises loop.sh's ASK-TIER
+# approval watch-loop end to end, standing in for BOTH claude and its deny-check
+# hook (the real hook is wired into real claude via --settings; the stub can't be).
+#
+# It mimics the hook half of the protocol: it drops a pending-approval.json into
+# the loop's .loop/ dir (where loop.sh's watch-loop polls), blocks for the
+# loop to write approval-response, then deletes BOTH files (exactly as the real
+# hook does) and reports the human's verdict, before emitting the usual
+# stream-json + status-file so the loop's marker logic can terminate.
+#
+# Driven by the same prompt-parsing as stub-claude, plus:
+#   STUB_APPROVAL_RULE     ask-tier rule label to request (default "rm -rf")
+#   STUB_APPROVAL_COMMAND  command string to request approval for
+#   STUB_APPROVAL_DESC     optional Claude "description" for the request
+#   STUB_APPROVAL_OUT      file to record the resolved verdict (allow|deny) into
+# It reuses STUB_STATUS / STUB_REASON / STUB_EXIT and the marker side effects from
+# stub-claude semantics so the loop completes a phase normally afterwards.
+
+set -uo pipefail
+
+# --- Recover the prompt (-p / --print) and its tokens -----------------------
+prompt=""
+prev=""
+for arg in "$@"; do
+	[[ "$prev" == "-p" || "$prev" == "--print" ]] && prompt="$arg"
+	prev="$arg"
+done
+read -ra ptoks <<<"$prompt"
+slash="${ptoks[0]:-}"
+plan="${ptoks[1]:-}"
+status_path=""
+for ((i = 0; i < ${#ptoks[@]}; i++)); do
+	[[ "${ptoks[i]}" == "--status" ]] && status_path="${ptoks[i + 1]:-}"
+done
+
+st="${STUB_STATUS:-ok}"
+rs="${STUB_REASON:-}"
+ex="${STUB_EXIT:-0}"
+
+# --- Play the hook half of the ask-tier protocol ----------------------------
+# Only attempt it when the loop signalled interactivity is enabled (the same
+# signal the real hook keys off): LOOP_APPROVAL_DIR present and a directory.
+if [[ -n "${LOOP_APPROVAL_DIR:-}" && -d "${LOOP_APPROVAL_DIR}" ]]; then
+	req="${LOOP_APPROVAL_DIR%/}/pending-approval.json"
+	resp="${LOOP_APPROVAL_DIR%/}/approval-response"
+	rule="${STUB_APPROVAL_RULE:-rm -rf}"
+	command="${STUB_APPROVAL_COMMAND:-rm -rf node_modules/.cache}"
+	desc="${STUB_APPROVAL_DESC:-}"
+
+	jq -cn --arg rule "$rule" --arg command "$command" --arg description "$desc" \
+		'{rule:$rule, command:$command, description:$description}' \
+		>"${req}.tmp" && mv -f "${req}.tmp" "$req"
+
+	# Block for the loop's verdict (the loop reads the TTY and writes this file).
+	verdict=""
+	while :; do
+		if [[ -f "$resp" ]]; then
+			verdict="$(tr -d '[:space:]' <"$resp" 2>/dev/null || true)"
+			break
+		fi
+		sleep 0.1
+	done
+	# Clean up BOTH files, exactly as the real hook does.
+	rm -f "$req" "$resp"
+	[[ -n "${STUB_APPROVAL_OUT:-}" ]] && printf '%s\n' "${verdict:-<empty>}" >"$STUB_APPROVAL_OUT"
+fi
+
+# --- Marker side effects (mirrors stub-claude) ------------------------------
+if [[ -z "${STUB_NOFLIP:-}" && -n "$plan" && -f "$plan" ]]; then
+	case "$slash" in
+	/implement-phase)
+		if ! grep -qE '^#+ .*🔄' "$plan"; then
+			awk '{ if (!d && $0 ~ /^#+ .*⏳/) { sub(/⏳/, "🔄"); d=1 } print }' \
+				"$plan" >"${plan}.stub.tmp" && mv "${plan}.stub.tmp" "$plan"
+		fi
+		;;
+	/close-phase)
+		if [[ "$st" == "ok" ]]; then
+			awk '{ if (!d && $0 ~ /^#+ .*🔄/) { sub(/🔄/, "✅"); d=1 } print }' \
+				"$plan" >"${plan}.stub.tmp" && mv "${plan}.stub.tmp" "$plan"
+		fi
+		;;
+	esac
+fi
+
+# --- Status file + stream-json (mirrors stub-claude) ------------------------
+if [[ "$st" != "none" && -n "$status_path" ]]; then
+	mkdir -p "$(dirname "$status_path")"
+	if [[ "$st" == "ok" ]]; then
+		printf '{"status":"ok"}\n' >"$status_path"
+	else
+		printf '{"status":"%s","reason":"%s"}\n' "$st" "$rs" >"$status_path"
+	fi
+fi
+
+is_error=false
+[[ "$st" == "ok" ]] || is_error=true
+printf '{"type":"system","subtype":"init","session_id":"stub-approval"}\n'
+printf '{"type":"result","is_error":%s,"terminal_reason":"%s","num_turns":1}\n' "$is_error" "$st"
+
+exit "${ex:-0}"

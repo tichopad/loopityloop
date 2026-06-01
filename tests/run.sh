@@ -14,6 +14,7 @@ ROOT="$(cd "$HERE/.." && pwd)"
 LOOP="$ROOT/loop.sh"
 STUB="$HERE/stub-claude"
 STUB_HANG="$HERE/stub-claude-hang"
+STUB_APPROVAL="$HERE/stub-claude-approval"
 FORMATTER="$ROOT/format-stream.sh"
 FIXTURES="$HERE/fixtures"
 
@@ -290,6 +291,71 @@ for p in "$stub_pid" "$sleep_pid"; do
 	if kill -0 "$p" 2>/dev/null; then surv=$((surv + 1)); kill -KILL "$p" 2>/dev/null; fi
 done
 if [[ "$surv" == 0 ]]; then pass "no stub/sleep children survive the teardown"; else fail "$surv child process(es) survived the teardown"; fi
+
+# ─────────────────────────────────────────────────────────────────────────────
+
+section "no usable TTY: preflight warns and disables interactive approvals"
+# The harness runs with no controlling terminal, so the ordinary all-ok run takes
+# the degrade path: a non-fatal warning, INTERACTIVE off, and the loop still
+# completes (ask-tier commands would silently deny, but the stub issues none).
+dir="$(make_repo all-pending.md feature/work)"
+invoke "$dir" STUB_STATUS=ok
+assert_rc 0 "no-TTY run still completes"
+assert_contains "no TTY detected" "emits the non-fatal no-TTY warning"
+assert_contains "interactive approvals disabled" "names the degraded behaviour"
+assert_no_file "$dir/.loop/pending-approval.json" "no approval request left behind"
+assert_no_file "$dir/.loop/approval-response" "no approval response left behind"
+
+# An ask-tier approval CYCLE end to end. The harness has no real TTY, so we force
+# interactivity on and drive the prompt via the loop's test seam:
+#   LOOP_APPROVAL_TTY_IN  — a file pre-filled with the human's answer (read returns
+#                           at once; nothing blocks on a human).
+#   LOOP_APPROVAL_TTY_OUT — a throwaway file capturing the rendered prompt.
+# stub-claude-approval plays BOTH claude and its deny-check hook: it drops a
+# pending-approval.json, blocks for the loop to answer, then deletes both files
+# (as the real hook does) and records the resolved verdict. This exercises the
+# real loop.sh watch-loop: request detection → prompt render → TTY read → response
+# write → hook cleanup → resume → completion.
+# run_approval <answer> <expected-verdict> <label>
+APPROVAL_BIN="$(mktemp -d)"; TMP_PATHS+=("$APPROVAL_BIN")
+ln -sf "$STUB_APPROVAL" "$APPROVAL_BIN/claude"
+run_approval() {
+	local answer="$1" expect="$2" label="$3"
+	local dir ttyin ttyout verdictfile
+	dir="$(make_repo all-pending.md feature/work)"
+	ttyin="$(mktemp)"; ttyout="$(mktemp)"; verdictfile="$(mktemp)"
+	TMP_PATHS+=("$ttyin" "$ttyout" "$verdictfile")
+	printf '%s\n' "$answer" >"$ttyin"
+	local out rc
+	out="$(cd "$dir" && env PATH="$APPROVAL_BIN:$PATH" \
+		LOOP_APPROVAL_TTY_IN="$ttyin" LOOP_APPROVAL_TTY_OUT="$ttyout" \
+		STUB_STATUS=ok STUB_APPROVAL_RULE="rm -rf" \
+		STUB_APPROVAL_COMMAND="rm -rf node_modules/.cache" \
+		STUB_APPROVAL_DESC="Clearing stale build cache" \
+		STUB_APPROVAL_OUT="$verdictfile" \
+		bash "$LOOP" plan.md 2>&1)"
+	rc=$?
+	local got; got="$(tr -d '[:space:]' <"$verdictfile" 2>/dev/null || true)"
+	if [[ "$rc" == 0 ]]; then pass "approval ($label): loop completes (rc=0)"; else fail "approval ($label): loop rc=$rc (out: $out)"; fi
+	if [[ "$got" == "$expect" ]]; then pass "approval ($label): hook resolved to '$expect'"; else fail "approval ($label): verdict '$got' (want '$expect')"; fi
+	# The prompt the loop rendered must name the rule, the command, and Claude's note.
+	local prompt; prompt="$(cat "$ttyout" 2>/dev/null || true)"
+	if [[ "$prompt" == *"Approval needed"* && "$prompt" == *"rm -rf"* ]]; then pass "approval ($label): prompt rendered with rule/command"; else fail "approval ($label): prompt not rendered ($prompt)"; fi
+	if [[ "$prompt" == *"Clearing stale build cache"* ]]; then pass "approval ($label): prompt includes Claude's description"; else fail "approval ($label): prompt missing description ($prompt)"; fi
+	# Coordination files must be cleaned up; an approvals.log line must be recorded.
+	assert_no_file "$dir/.loop/pending-approval.json" "approval ($label): request file cleaned up"
+	assert_no_file "$dir/.loop/approval-response" "approval ($label): response file cleaned up"
+	if grep -q "rm -rf" "$dir/.loop/logs/approvals.log" 2>/dev/null; then pass "approval ($label): decision logged to approvals.log"; else fail "approval ($label): no approvals.log entry"; fi
+}
+
+section "ask-tier interactive: 'y' approves the command and the loop continues"
+run_approval "y" allow "approve"
+
+section "ask-tier interactive: bare Enter denies but the loop still proceeds"
+run_approval "" deny "deny-on-enter"
+
+section "ask-tier interactive: 'YES' (case-insensitive, trimmed) approves"
+run_approval "  YES  " allow "approve-yes-trimmed"
 
 # ─────────────────────────────────────────────────────────────────────────────
 printf '\n────────────────────────────────────────\n'
