@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+#
+# stub-claude-hang — a fake `claude` that refuses to die politely, for the
+# interrupt teardown test. It mimics the real failure mode: a Node app that
+# swallows SIGINT/SIGTERM in headless mode and keeps a child process alive, so
+# only a process-GROUP kill (SIGKILL) tears the tree down. tests/run.sh
+# symlinks it onto PATH as `claude` for the interrupt case.
+#
+# It ignores INT/TERM, spawns a long sleep child to stand in for an orphaned
+# node/MCP grandchild, drops a breadcrumb file naming both PIDs (so the test can
+# assert neither survives the teardown), then waits effectively forever.
+
+# Swallow the signals loop.sh's trap would normally lean on propagating.
+trap '' INT TERM
+
+# A child to stand in for the orphan-able subprocess tree.
+sleep 600 &
+child=$!
+
+# Breadcrumb: <self_pid> <child_pid>, so the test can poll for survivors.
+if [[ -n "${STUB_PIDFILE:-}" ]]; then
+	printf '%s %s\n' "$$" "$child" >"$STUB_PIDFILE"
+fi
+
+# Emit one line so the pipeline (tee | formatter) has something to chew on,
+# then block until killed.
+printf '{"type":"system","subtype":"init","session_id":"hang"}\n'
+
+wait "$child"

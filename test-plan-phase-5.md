@@ -1,0 +1,6 @@
+- [ ] On a toy 2–3 phase repo, `./loop.sh` drives every phase to completion, each as its own atomic commit, and exits 0
+- [ ] On success, `final-verification` writes `human-verification.md` with items grouped by phase, deduplicated, and each annotated with a how-to-verify hint
+- [ ] The loop prints the human-verification item count and file path on the success exit
+- [ ] A phase with an unfixable FAIL halts with the framed handback (phase/step/reason/log), leaves the phase `🔄` with partial work uncommitted, and re-running `./loop.sh` resumes that phase
+- [ ] Nothing is pushed to the remote during a full run
+- [ ] `human-verification.md` and `.loop/` stay out of `git status` and don't trip a subsequent `/pr-create`

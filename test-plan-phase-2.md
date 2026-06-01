@@ -1,0 +1,5 @@
+- [ ] In a live `claude -p … --dangerously-skip-permissions --settings "$DENY_SETTINGS"` run, asking the agent to `git push` is blocked (deny visible in the streamed transcript)
+- [ ] In that same live run, `git commit` proceeds normally (not blocked)
+- [ ] Live attempts at `git reset --hard`, `rm -rf <path>`, and `curl`/`wget` are each blocked by the hook
+- [ ] The deny reason ("… blocked by loop deny-list") is readable in the live output / `.loop/logs/*.jsonl`
+- [ ] After a real loop run, `.loop/` and `human-verification.md` stay out of `git status` (excluded, never committed)

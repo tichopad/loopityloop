@@ -1,0 +1,5 @@
+# Runtime artifacts loop.sh writes into the repo it operates on. They are also
+# auto-added to that repo's .git/info/exclude at runtime; tracked here too so a
+# fresh clone never accidentally commits them.
+.loop/
+human-verification.md

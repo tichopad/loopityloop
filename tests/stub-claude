@@ -1,0 +1,113 @@
+#!/usr/bin/env bash
+#
+# stub-claude — a deterministic fake `claude` for loop.sh control-flow tests.
+#
+# It is symlinked onto PATH as `claude` by tests/run.sh. It honours env vars to
+# script its result, mimics just enough of the real skills' side effects for the
+# loop's marker logic to terminate, and emits a minimal stream-json result line.
+#
+#   STUB_STATUS  ok | blocked | none   (default ok; "none" writes no status file)
+#   STUB_REASON  reason string written/surfaced for a blocked status
+#   STUB_EXIT    process exit code (default 0)
+#   STUB_NOFLIP  if set (any value), never touch plan.md markers
+#   STUB_SCRIPT  optional path to a per-call script: one "STATUS|REASON|EXIT"
+#                line consumed per call via a sibling "<file>.n" counter, so the
+#                three steps of a phase can return different scripted results.
+#
+# Marker side effects (skipped entirely when STUB_NOFLIP is set):
+#   /implement-phase  -> flip the first ⏳ heading to 🔄 (unless a 🔄 already
+#                        exists, in which case it resumes — no new marker),
+#                        mirroring the real skill marking the phase in-progress.
+#   /close-phase      -> on an "ok" status, flip the first 🔄 heading to ✅.
+#   /verify-and-fix   -> no marker change.
+
+set -uo pipefail
+
+# --- Recover the prompt passed via -p / --print -----------------------------
+prompt=""
+prev=""
+for arg in "$@"; do
+	if [[ "$prev" == "-p" || "$prev" == "--print" ]]; then
+		prompt="$arg"
+	fi
+	prev="$arg"
+done
+
+# Tokens of the prompt: ptoks[0]=slash command, ptoks[1]=plan path, then flags.
+read -ra ptoks <<<"$prompt"
+slash="${ptoks[0]:-}"
+plan="${ptoks[1]:-}"
+
+# Extract the --status <path> argument from within the prompt.
+status_path=""
+for ((i = 0; i < ${#ptoks[@]}; i++)); do
+	if [[ "${ptoks[i]}" == "--status" ]]; then
+		status_path="${ptoks[i + 1]:-}"
+	fi
+done
+
+# --- Decide this call's scripted result -------------------------------------
+st="${STUB_STATUS:-ok}"
+rs="${STUB_REASON:-}"
+ex="${STUB_EXIT:-0}"
+
+if [[ -n "${STUB_SCRIPT:-}" && -f "${STUB_SCRIPT}" ]]; then
+	counter="${STUB_SCRIPT}.n"
+	n=0
+	[[ -f "$counter" ]] && n="$(cat "$counter")"
+	line="$(sed -n "$((n + 1))p" "$STUB_SCRIPT")"
+	printf '%s' "$((n + 1))" >"$counter"
+	if [[ -n "$line" ]]; then
+		IFS='|' read -r f_st f_rs f_ex <<<"$line"
+		st="${f_st:-ok}"
+		rs="${f_rs:-}"
+		ex="${f_ex:-0}"
+	fi
+fi
+
+# --- Mimic the skills' marker transitions -----------------------------------
+if [[ -z "${STUB_NOFLIP:-}" && -n "$plan" && -f "$plan" ]]; then
+	case "$slash" in
+	/implement-phase)
+		# Mark the phase in-progress as an early action (resume if one already is).
+		if ! grep -qE '^#+ .*🔄' "$plan"; then
+			awk '{ if (!d && $0 ~ /^#+ .*⏳/) { sub(/⏳/, "🔄"); d=1 } print }' \
+				"$plan" >"${plan}.stub.tmp" && mv "${plan}.stub.tmp" "$plan"
+		fi
+		;;
+	/close-phase)
+		# A successful close marks the phase done.
+		if [[ "$st" == "ok" ]]; then
+			awk '{ if (!d && $0 ~ /^#+ .*🔄/) { sub(/🔄/, "✅"); d=1 } print }' \
+				"$plan" >"${plan}.stub.tmp" && mv "${plan}.stub.tmp" "$plan"
+		fi
+		;;
+	esac
+fi
+
+# --- Write the status file (the skills' final action) -----------------------
+if [[ "$st" != "none" && -n "$status_path" ]]; then
+	mkdir -p "$(dirname "$status_path")"
+	if [[ "$st" == "ok" ]]; then
+		printf '{"status":"ok"}\n' >"$status_path"
+	else
+		printf '{"status":"%s","reason":"%s"}\n' "$st" "$rs" >"$status_path"
+	fi
+fi
+
+# --- Emit a realistic multi-event stream-json sequence ----------------------
+# Mirrors the shape the real `claude … --output-format stream-json --verbose`
+# produces: an init line, an assistant text turn, an assistant tool_use turn, a
+# user tool_result, then the closing result. Lets the formatter tests exercise
+# every rendering branch while keeping the control-flow contract (status file,
+# markers, exit code) untouched.
+is_error=false
+[[ "$st" == "ok" ]] || is_error=true
+
+printf '{"type":"system","subtype":"init","session_id":"stub-session"}\n'
+printf '{"type":"assistant","message":{"content":[{"type":"text","text":"Working on %s for %s."}]}}\n' "$slash" "$plan"
+printf '{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Bash","input":{"command":"echo running %s"}}]}}\n' "$slash"
+printf '{"type":"user","message":{"content":[{"type":"tool_result","is_error":false,"content":"running %s"}]}}\n' "$slash"
+printf '{"type":"result","is_error":%s,"terminal_reason":"%s","num_turns":1}\n' "$is_error" "$st"
+
+exit "${ex:-0}"

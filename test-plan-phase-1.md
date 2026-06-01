@@ -1,0 +1,5 @@
+- [ ] On a block, the handback banner is clearly framed and easy to spot in a real terminal
+- [ ] The terminal bell rings audibly when the loop blocks
+- [ ] A desktop notification appears (notify-send) when the loop blocks
+- [ ] Running the happy path, the loop visibly advances through each phase/step with live output
+- [ ] A saved transcript under `.loop/logs/phase-*-*.jsonl` opens and is readable after a run

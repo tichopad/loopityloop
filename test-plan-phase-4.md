@@ -1,0 +1,5 @@
+- [ ] `/verify-and-fix plan.md --status .loop/status.json` on a phase whose `test-plan.md` has a deliberately-broken programmatic case + a genuine human-only case fixes & checks off the broken one, leaves the human-only one unchecked, and writes `{"status":"ok"}`
+- [ ] An unfixable FAIL is blocked after the 10-attempt budget, writing `{"status":"blocked","reason":…}` with a reason naming the surviving case
+- [ ] The verify step fans out one subagent per case (observable in the transcript), keeping the coordinator's context lean
+- [ ] Hand-invocation `/verify-and-fix plan.md` (no `--status`) verifies/fixes and reports to the terminal without writing a status file
+- [ ] In `--status` mode the skill never prompts for input (runs fully unattended) and writes the status file last, exactly once

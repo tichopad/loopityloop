@@ -1,0 +1,5 @@
+- [ ] `/implement-phase plan.md --status .loop/status.json` in a scratch repo auto-selects + implements the phase with no interactive prompt, then writes `.loop/status.json` = `{"status":"ok"}`
+- [ ] Injecting a core-assumption mismatch makes implement-phase write `{"status":"blocked","reason":…}` and stop instead of prompting
+- [ ] `/close-phase plan.md --status .loop/status.json` archives `test-plan.md`, marks the phase `✅`, commits with the phase number, and asks nothing — then writes `.loop/status.json` = `{"status":"ok"}`
+- [ ] Regression: `/implement-phase plan.md` (no `--status`) still asks to confirm the selected phase, exactly as before
+- [ ] Regression: `/close-phase plan.md` (no `--status`) still asks about each unchecked `test-plan.md` item, exactly as before
