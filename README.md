@@ -7,17 +7,21 @@ It owns the tedious middle of the workflow. You keep the judgement calls: planni
 ## What you need
 
 - **Claude Code CLI** (`claude`), `jq`, `git`, GNU `timeout` (`coreutils`).
-- **Skills** installed in `~/.claude/skills/`: `implement-phase`, `verify-and-fix`, `close-phase`, `final-verification`.
+- **Skills**: `implement-phase`, `verify-and-fix`, `close-phase`, `final-verification`. These ship in this repo under `skills/` and `install.sh` links them into `~/.claude/skills/` for you.
 - An approved **`plan.md`** with phase headings ending in a status marker:
   - `⏳` waiting · `🔄` in-progress · `✅` done
 - A **git repo on a feature branch** (not `main`/`master`), **clean working tree**.
 
 ## Setup on a new machine
 
-Clone over SSH and run the installer. It symlinks `loop.sh` into a `PATH`
-directory (`~/.local/bin` by default); `loop.sh` resolves that symlink back to the
-clone, so its helper scripts (`deny-check.sh`, `format-stream.sh`) keep working
-from the one link.
+Clone over SSH and run the installer. It does two things, both via symlink so the
+clone stays the single source of truth:
+
+1. Links `loop.sh` into a `PATH` directory (`~/.local/bin` by default); `loop.sh`
+   resolves that symlink back to the clone, so its helper scripts
+   (`deny-check.sh`, `format-stream.sh`) keep working from the one link.
+2. Links the four skills under `skills/` into `~/.claude/skills/` so `claude`
+   finds them by name.
 
 ```bash
 git clone git@github.com:tichopad/loopityloop.git
@@ -26,13 +30,13 @@ cd loopityloop
 ```
 
 - If `~/.local/bin` isn't on your `PATH`, the installer prints the line to add to your shell rc.
-- Install elsewhere: `BIN_DIR=~/bin ./install.sh`. Remove the link: `./install.sh --uninstall`.
-- Prefer no install? Just run `./loop.sh` from the clone, or add the clone dir to `PATH` yourself.
+- Install elsewhere: `BIN_DIR=~/bin ./install.sh`; link skills elsewhere: `SKILLS_DIR=... ./install.sh`.
+- Remove the links: `./install.sh --uninstall` (only removes links pointing back into this clone — a hand-managed skill dir is left untouched).
+- A skill that already exists in `~/.claude/skills/` as a real directory is **skipped, not overwritten** — remove it yourself and re-run if you want the bundled version.
+- Prefer no install? Just run `./loop.sh` from the clone, but you must still make the skills reachable to `claude` (link or copy `skills/*` into `~/.claude/skills/`).
 
-You still need the prerequisites above — in particular the four **skills** under
-`~/.claude/skills/` (`implement-phase`, `verify-and-fix`, `close-phase`,
-`final-verification`), which are **not** bundled in this repo. `loop.sh` checks the
-CLI tools and the deny-check hook at startup and refuses to run if anything is missing.
+`loop.sh` checks the CLI tools (`claude`, `jq`, `git`, `timeout`) and the deny-check
+hook at startup and refuses to run if anything is missing.
 
 ## Usage
 
@@ -82,7 +86,8 @@ Runs under `--dangerously-skip-permissions`, so containment is layered:
 | `loop.sh` | The orchestrator — pure control flow, no prompts. |
 | `deny-check.sh` | PreToolUse deny-list hook (irreversible-command guard). |
 | `format-stream.sh` | Renders raw stream-json into a readable terminal feed. |
-| `install.sh` | Symlinks `loop.sh` onto your `PATH` (see Setup). |
+| `install.sh` | Symlinks `loop.sh` onto your `PATH` and the skills into `~/.claude/skills/` (see Setup). |
+| `skills/` | The four skills the loop invokes (`implement-phase`, `verify-and-fix`, `close-phase`, `final-verification`). |
 | `implement-loop-prd.md` | The PRD this was built from. |
 | `plan.md` | The implementation plan for loopityloop itself. |
 | `tests/` | `run.sh` harness, stub `claude`, fixtures, deny-check tests. |
