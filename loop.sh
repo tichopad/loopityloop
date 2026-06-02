@@ -27,9 +27,12 @@ set -m
 
 # ---- Config constants (no project specifics) -------------------------------
 PLAN="${1:-plan.md}"
-LOOP_DIR=".loop"
-STATUS_FILE=".loop/status.json"
-LOG_DIR=".loop/logs"
+# The loop's scratch/state/log paths (LOOP_DIR, STATUS_FILE, LOG_DIR, and the three
+# APPROVAL_* files below) are NOT set here — they are computed in preflight() once
+# the git dir is known. They live under "$(git rev-parse --absolute-git-dir)/loopityloop/",
+# i.e. inside the git dir, which isn't knowable until we've confirmed we're inside a
+# work tree. Putting them there gives automatic per-repo AND per-worktree isolation
+# and keeps them invisible to formatters/editors (everything under .git/ is ignored).
 HUMAN_VERIFICATION="human-verification.md"
 MAX_TURNS=80
 # Active-time budget per call: the wall-clock time a call may spend *working*,
@@ -48,10 +51,8 @@ CALL_BACKSTOP=4h
 # The hook writes a request to APPROVAL_REQUEST when an ask-tier command needs the
 # human, then blocks until APPROVAL_RESPONSE appears; the foreground loop renders
 # the prompt, reads the TTY, and writes the response. Approval is per-invocation —
-# nothing here is persisted across runs.
-APPROVAL_REQUEST=".loop/pending-approval.json"
-APPROVAL_RESPONSE=".loop/approval-response"
-APPROVAL_LOG=".loop/logs/approvals.log"
+# nothing here is persisted across runs. Like LOOP_DIR/STATUS_FILE/LOG_DIR above,
+# these paths are derived in preflight() once the git dir is known.
 # Cadence (seconds) at which the watch-loop polls for an approval request and for
 # job completion. Short enough to feel responsive, coarse enough to stay cheap.
 WATCH_POLL_INTERVAL=0.2
@@ -68,8 +69,9 @@ APPROVAL_TTY_OUT="${LOOP_APPROVAL_TTY_OUT:-/dev/tty}"
 APPROVAL_TTY_IN="${LOOP_APPROVAL_TTY_IN:-/dev/tty}"
 
 # Whether interactive ask-tier approvals are enabled this run is signalled SOLELY
-# by the exported LOOP_APPROVAL_DIR: preflight exports it (the absolute .loop/
-# path) when a usable TTY is probed, and leaves it unset otherwise. The hook keys
+# by the exported LOOP_APPROVAL_DIR: preflight exports it (the absolute path to the
+# git-dir loopityloop/ directory) when a usable TTY is probed, and leaves it unset
+# otherwise. The hook keys
 # off that single variable — when it is unset/empty the hook degrades every
 # ask-tier command to an immediate deny, so a headless run can never deadlock.
 
@@ -561,6 +563,21 @@ preflight() {
 	git rev-parse --is-inside-work-tree >/dev/null 2>&1 \
 		|| abort "not a git repository — run the loop from inside the target repo"
 
+	# Now that we know we're inside a work tree, derive every scratch/state/log path
+	# under the git dir's loopityloop/ directory. --absolute-git-dir resolves to
+	# .git/ for the main work tree and .git/worktrees/<name>/ for a linked worktree,
+	# so this gives automatic per-repo AND per-worktree isolation, and lives where no
+	# formatter/editor will ever see it. These assign the GLOBALS (no `local`), since
+	# every function that reads them runs only after preflight.
+	local git_dir_abs
+	git_dir_abs="$(git rev-parse --absolute-git-dir 2>/dev/null)" || abort "could not resolve the git directory"
+	LOOP_DIR="${git_dir_abs}/loopityloop"
+	STATUS_FILE="${LOOP_DIR}/status.json"
+	LOG_DIR="${LOOP_DIR}/logs"
+	APPROVAL_REQUEST="${LOOP_DIR}/pending-approval.json"
+	APPROVAL_RESPONSE="${LOOP_DIR}/approval-response"
+	APPROVAL_LOG="${LOG_DIR}/approvals.log"
+
 	# Refuse the default branch so per-phase commits never land on it.
 	local default_branch current_branch
 	default_branch="$(git symbolic-ref --short refs/remotes/origin/HEAD 2>/dev/null | sed 's@^origin/@@' || true)"
@@ -592,9 +609,12 @@ preflight() {
 	[[ -x "$FORMATTER" ]] \
 		|| abort "stream formatter missing or not executable: ${FORMATTER}"
 
-	# Keep loop artifacts out of every commit (never touches a tracked file).
-	ensure_excluded ".loop/"
+	# Keep the human-verification checklist out of every commit (never touches a
+	# tracked file). The loop's own state/logs need no exclude — they live under the
+	# git dir (LOOP_DIR above), which git never tracks.
 	ensure_excluded "$HUMAN_VERIFICATION"
+	# Create the whole loopityloop/logs tree under the git dir. Must come after the
+	# path derivation above.
 	mkdir -p "$LOG_DIR"
 
 	# Sweep any stale approval coordination files from an aborted prior run, so a
@@ -613,11 +633,12 @@ preflight() {
 	# behaviour, with no risk of deadlock.
 	if { exec 3<"$APPROVAL_TTY_IN"; } 2>/dev/null; then
 		exec 3<&-   # close the probe fd; we only needed to know it opens
-		# Hand the hook (via claude's inherited env) the absolute .loop/ path, whose
-		# mere presence is the "interactive approvals enabled" signal. Absolute so the
-		# hook resolves it regardless of cwd.
+		# Hand the hook (via claude's inherited env) the git-dir loopityloop/ path,
+		# whose mere presence is the "interactive approvals enabled" signal. $LOOP_DIR
+		# is already absolute (derived from --absolute-git-dir), so the hook resolves
+		# it regardless of cwd — no need to cd into it.
 		export LOOP_APPROVAL_DIR
-		LOOP_APPROVAL_DIR="$(cd "$LOOP_DIR" && pwd)"
+		LOOP_APPROVAL_DIR="$LOOP_DIR"
 	else
 		unset LOOP_APPROVAL_DIR 2>/dev/null || true
 		printf 'loop.sh: warning — no TTY detected — interactive approvals disabled this run; ask-tier commands will be denied.\n' >&2

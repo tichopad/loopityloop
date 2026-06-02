@@ -60,7 +60,7 @@ Summarize what passed (and what you fixed), what is left for human verification,
 Loop Mode is an **additive, opt-in** override for unattended (headless) runs. It activates **only** when this skill is invoked with a `--status <path>` argument, e.g.:
 
 ```
-/verify-and-fix plan.md --status .loop/status.json
+/verify-and-fix plan.md --status .git/loopityloop/status.json
 ```
 
 When the flag is **absent**, ignore this entire section — the steps above behave exactly as written, and you may surface results to the user and ask for guidance on a genuinely ambiguous case. Loop Mode changes nothing about hand-invocation.

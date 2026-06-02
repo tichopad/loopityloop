@@ -56,7 +56,7 @@ assert_allow() {
 	if [[ -z "$OUT" ]]; then pass "allows: $2"; else fail "allows: $2 (unexpected output: '$OUT')"; fi
 }
 
-# Run the hook with interactivity ENABLED against a scratch .loop/ dir holding a
+# Run the hook with interactivity ENABLED against a scratch loop state dir holding a
 # PRE-SEEDED approval-response, so the hook's poll returns immediately (no block).
 # Asserts the request file was written with the right fields, then asserts the
 # verdict: <verdict>=allow → silent proceed (no output); =deny → deny JSON. Both

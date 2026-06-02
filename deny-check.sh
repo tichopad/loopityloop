@@ -33,12 +33,14 @@
 # This hook runs inside the loop's BACKGROUNDED call pipeline, i.e. in a
 # background process group, so it CANNOT read the controlling terminal (it would
 # get SIGTTIN and stop, or a read would fail EIO). The foreground loop.sh must do
-# the actual TTY read. We coordinate through files in the loop's .loop/ dir.
+# the actual TTY read. We coordinate through files in the loop's state dir
+# (LOOP_APPROVAL_DIR — the git-dir loopityloop/ directory).
 #
 # The hook learns two things from a single inherited environment variable that
 # loop.sh exports (claude inherits loop.sh's env, and this hook inherits claude's):
 #
-#   LOOP_APPROVAL_DIR — absolute path to the loop's .loop/ directory.
+#   LOOP_APPROVAL_DIR — absolute path to the loop's state directory (the
+#                       git-dir loopityloop/ directory).
 #
 # Its meaning is overloaded on purpose, the simplest robust signal:
 #   * UNSET or EMPTY  → interactive approvals are DISABLED (no usable TTY, or the

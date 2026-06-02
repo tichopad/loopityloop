@@ -45,7 +45,7 @@ If the plan-path argument is missing, ask for it before proceeding.
 Loop Mode is an **additive, opt-in** override for unattended (headless) runs. It activates **only** when this skill is invoked with a `--status <path>` argument, e.g.:
 
 ```
-/close-phase plan.md --status .loop/status.json
+/close-phase plan.md --status .git/loopityloop/status.json
 ```
 
 When the flag is **absent**, ignore this entire section — every step above behaves exactly as written, including asking the user about each unchecked item. Loop Mode changes nothing about hand-invocation.

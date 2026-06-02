@@ -52,11 +52,11 @@ That's it. The loop selects the next `⏳` phase, works it, commits it, and move
 ## What it produces
 
 - **Commits** — one atomic commit per completed phase (the skills commit; the script never does). It **never pushes**.
-- `.loop/logs/phase-N-<step>.jsonl` — full transcript per phase/step.
-- `.loop/logs/approvals.log` — one line per ask-tier decision (timestamp · phase/step · rule · command · allowed/denied), when any approvals were prompted.
+- `.git/loopityloop/logs/phase-N-<step>.jsonl` — full transcript per phase/step.
+- `.git/loopityloop/logs/approvals.log` — one line per ask-tier decision (timestamp · phase/step · rule · command · allowed/denied), when any approvals were prompted.
 - `human-verification.md` — on success, a consolidated checklist of human-only checks, grouped by phase with "how to verify" hints. Work through it, then run `/pr-create` yourself.
 
-(`.loop/` and `human-verification.md` are auto-added to `.git/info/exclude` — never committed.)
+(Loop state and logs live under `.git/loopityloop/` — inside the git dir, so git never tracks them and formatters/editors never see them, with no per-project ignore-file upkeep. Because that path resolves per worktree, linked worktrees stay isolated automatically. `human-verification.md` is auto-added to `.git/info/exclude` so it, too, is never committed.)
 
 ## When it stops
 
@@ -93,7 +93,7 @@ Approve? [y/N]   (Enter/anything = deny · Ctrl+C = abort whole loop)
 - The wait is **indefinite** and your deliberation time is **free** — it does not count against the 40-minute budget.
 - Approval is **per-invocation**: nothing is remembered. The next `rm -rf` asks again.
 - **Markdown deletes are exempt:** an `rm` (even `rm -rf`) whose targets are all `*.md` files runs without a prompt. Any non-`.md` target, a directory, or a chained command (`&&`, `|`, …) still asks.
-- Every decision is appended to `.loop/logs/approvals.log`.
+- Every decision is appended to `.git/loopityloop/logs/approvals.log`.
 
 **No terminal? No problem — it fails closed.** With no usable controlling terminal (cron, CI, `nohup`, a pipe), interactive approval is impossible, so the loop prints a non-fatal startup warning and **silently denies every ask-tier command** — exactly the old behaviour, with no risk of hanging on a prompt nobody can answer.
 

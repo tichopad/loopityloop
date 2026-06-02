@@ -104,7 +104,7 @@ Let me know when testing is complete so I can mark the phase as done.
 Loop Mode is an **additive, opt-in** override for unattended (headless) runs. It activates **only** when this skill is invoked with a `--status <path>` argument, e.g.:
 
 ```
-/implement-phase plan.md --status .loop/status.json
+/implement-phase plan.md --status .git/loopityloop/status.json
 ```
 
 When the flag is **absent**, ignore this entire section — every step above behaves exactly as written, including the interactive confirmation and the wait-for-input on a mismatch. Loop Mode changes nothing about hand-invocation.

@@ -87,9 +87,9 @@ invoke "$dir" STUB_STATUS=ok
 assert_rc 0 "all-ok run exits 0"
 assert_contains "All phases complete." "prints the success message"
 assert_plan_complete "$dir" "every phase ends marked ✅"
-assert_file "$dir/.loop/logs/phase-1-implement.jsonl" "phase 1 implement log written"
-assert_file "$dir/.loop/logs/phase-3-close.jsonl" "advanced all the way to phase 3 close"
-assert_file "$dir/.loop/logs/final-verification.jsonl" "final-verification ran on the success path"
+assert_file "$dir/.git/loopityloop/logs/phase-1-implement.jsonl" "phase 1 implement log written"
+assert_file "$dir/.git/loopityloop/logs/phase-3-close.jsonl" "advanced all the way to phase 3 close"
+assert_file "$dir/.git/loopityloop/logs/final-verification.jsonl" "final-verification ran on the success path"
 
 section "success-path final-verification is non-gating (its failure never blocks)"
 script="$(mktemp)"
@@ -101,7 +101,7 @@ dir="$(make_repo all-pending.md feature/work)"
 invoke "$dir" STUB_SCRIPT="$script"
 assert_rc 0 "final-verification failure does not block the success exit"
 assert_contains "All phases complete." "still reports success"
-assert_file "$dir/.loop/logs/final-verification.jsonl" "the final-verification step did run"
+assert_file "$dir/.git/loopityloop/logs/final-verification.jsonl" "the final-verification step did run"
 assert_plan_complete "$dir" "every phase still ends ✅"
 
 section "blocked status stops immediately and surfaces the reason"
@@ -112,7 +112,7 @@ assert_contains "LOOP BLOCKED" "prints the framed handback banner"
 assert_contains "Step  : implement" "names the blocking step"
 assert_contains "core assumption no longer holds" "surfaces the blocked reason"
 assert_plan_pending "$dir" "leaves a pending phase (did not advance)"
-assert_no_file "$dir/.loop/logs/phase-1-verify.jsonl" "stops before the verify step"
+assert_no_file "$dir/.git/loopityloop/logs/phase-1-verify.jsonl" "stops before the verify step"
 
 section "missing status file is treated as blocked (fail-closed)"
 dir="$(make_repo all-pending.md feature/work)"
@@ -132,16 +132,16 @@ dir="$(make_repo all-done.md feature/work)"
 invoke "$dir" STUB_STATUS=blocked # would block if claude were ever invoked
 assert_rc 0 "all-done plan exits 0"
 assert_contains "All phases complete." "prints the success message"
-assert_no_file "$dir/.loop/logs/phase-1-implement.jsonl" "claude was never invoked"
+assert_no_file "$dir/.git/loopityloop/logs/phase-1-implement.jsonl" "claude was never invoked"
 
 section "a 🔄 phase on startup is resumed, not skipped or duplicated"
 dir="$(make_repo resume-mid.md feature/work)"
 invoke "$dir" STUB_STATUS=ok
 assert_rc 0 "resume run exits 0"
 assert_plan_complete "$dir" "all phases end ✅"
-assert_file "$dir/.loop/logs/phase-2-implement.jsonl" "in-progress phase 2 was worked (resumed)"
-assert_no_file "$dir/.loop/logs/phase-1-implement.jsonl" "already-✅ phase 1 was not re-processed"
-assert_file "$dir/.loop/logs/phase-3-close.jsonl" "continued on to phase 3"
+assert_file "$dir/.git/loopityloop/logs/phase-2-implement.jsonl" "in-progress phase 2 was worked (resumed)"
+assert_no_file "$dir/.git/loopityloop/logs/phase-1-implement.jsonl" "already-✅ phase 1 was not re-processed"
+assert_file "$dir/.git/loopityloop/logs/phase-3-close.jsonl" "continued on to phase 3"
 
 section "iteration cap bails loudly when markers never advance"
 dir="$(make_repo all-pending.md feature/work)"
@@ -159,8 +159,8 @@ invoke "$dir" STUB_SCRIPT="$script"
 assert_rc 1 "mid-phase block exits 1"
 assert_contains "Step  : verify" "blocks at the verify step"
 assert_contains "verify found an unfixable failure" "surfaces the scripted reason"
-assert_file "$dir/.loop/logs/phase-1-verify.jsonl" "the verify step did run"
-assert_no_file "$dir/.loop/logs/phase-1-close.jsonl" "the close step was never reached"
+assert_file "$dir/.git/loopityloop/logs/phase-1-verify.jsonl" "the verify step did run"
+assert_no_file "$dir/.git/loopityloop/logs/phase-1-close.jsonl" "the close step was never reached"
 assert_plan_pending "$dir" "phase left in-progress (close never ran)"
 
 section "pre-flight refuses the default branch"
@@ -199,7 +199,7 @@ section "raw log stays full JSONL; format-stream.sh renders it readable"
 dir="$(make_repo all-pending.md feature/work)"
 invoke "$dir" STUB_STATUS=ok
 assert_rc 0 "formatter run exits 0"
-log="$dir/.loop/logs/phase-1-implement.jsonl"
+log="$dir/.git/loopityloop/logs/phase-1-implement.jsonl"
 assert_file "$log" "raw phase log written"
 # The raw log (written by tee, upstream of the formatter) must keep full JSON,
 # including the result event and the tool_use/text events the stub now emits.
@@ -303,8 +303,8 @@ invoke "$dir" STUB_STATUS=ok
 assert_rc 0 "no-TTY run still completes"
 assert_contains "no TTY detected" "emits the non-fatal no-TTY warning"
 assert_contains "interactive approvals disabled" "names the degraded behaviour"
-assert_no_file "$dir/.loop/pending-approval.json" "no approval request left behind"
-assert_no_file "$dir/.loop/approval-response" "no approval response left behind"
+assert_no_file "$dir/.git/loopityloop/pending-approval.json" "no approval request left behind"
+assert_no_file "$dir/.git/loopityloop/approval-response" "no approval response left behind"
 
 # An ask-tier approval CYCLE end to end. The harness has no real TTY, so we force
 # interactivity on and drive the prompt via the loop's test seam:
@@ -343,9 +343,9 @@ run_approval() {
 	if [[ "$prompt" == *"Approval needed"* && "$prompt" == *"rm -rf"* ]]; then pass "approval ($label): prompt rendered with rule/command"; else fail "approval ($label): prompt not rendered ($prompt)"; fi
 	if [[ "$prompt" == *"Clearing stale build cache"* ]]; then pass "approval ($label): prompt includes Claude's description"; else fail "approval ($label): prompt missing description ($prompt)"; fi
 	# Coordination files must be cleaned up; an approvals.log line must be recorded.
-	assert_no_file "$dir/.loop/pending-approval.json" "approval ($label): request file cleaned up"
-	assert_no_file "$dir/.loop/approval-response" "approval ($label): response file cleaned up"
-	if grep -q "rm -rf" "$dir/.loop/logs/approvals.log" 2>/dev/null; then pass "approval ($label): decision logged to approvals.log"; else fail "approval ($label): no approvals.log entry"; fi
+	assert_no_file "$dir/.git/loopityloop/pending-approval.json" "approval ($label): request file cleaned up"
+	assert_no_file "$dir/.git/loopityloop/approval-response" "approval ($label): response file cleaned up"
+	if grep -q "rm -rf" "$dir/.git/loopityloop/logs/approvals.log" 2>/dev/null; then pass "approval ($label): decision logged to approvals.log"; else fail "approval ($label): no approvals.log entry"; fi
 }
 
 section "ask-tier interactive: 'y' approves the command and the loop continues"
